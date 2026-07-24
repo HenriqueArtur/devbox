@@ -207,6 +207,38 @@ else
   err "nvim broken"
 fi
 
+# ai-memory server: container running + loopback endpoint responding.
+if sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -qx ai-memory; then
+  ok "ai-memory container running"
+else
+  err "ai-memory container not running" "run: sudo docker start ai-memory"
+fi
+# Any HTTP response (even 404) proves the server is bound and answering;
+# 000 means connection refused / no listener.
+HTTP_CODE="$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' \
+  http://127.0.0.1:49374/ 2>/dev/null || echo 000)"
+if [ "$HTTP_CODE" != "000" ]; then
+  ok "ai-memory server bound on 127.0.0.1:49374 (HTTP $HTTP_CODE)"
+else
+  warn "ai-memory server not answering on 127.0.0.1:49374" \
+       "container may still be starting; retry in a few seconds"
+fi
+
+# Claude Code integration: MCP entry + hooks.
+CLAUDE_CFG="$HOME/.claude.json"
+CLAUDE_HOOKS="$HOME/.claude/settings.json"
+if [ -f "$CLAUDE_CFG" ] && grep -q '"ai-memory"' "$CLAUDE_CFG" 2>/dev/null; then
+  ok "ai-memory MCP registered in ~/.claude.json"
+else
+  err "ai-memory MCP NOT registered" "run: ai-memory install-mcp --client claude-code --apply"
+fi
+if [ -f "$CLAUDE_HOOKS" ] && grep -q 'ai-memory' "$CLAUDE_HOOKS" 2>/dev/null; then
+  ok "ai-memory lifecycle hooks installed"
+else
+  err "ai-memory hooks NOT installed" \
+      "run: ai-memory install-hooks --agent claude-code --project-strategy repo-root --apply"
+fi
+
 # ============================================================================
 # summary
 # ============================================================================

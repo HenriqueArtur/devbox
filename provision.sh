@@ -169,6 +169,36 @@ if ! command -v claude >/dev/null 2>&1; then
   npm install -g @anthropic-ai/claude-code
 fi
 
+# --- ai-memory server + Claude Code integration -----------------------------
+# Server runs as a Docker container bound to loopback (127.0.0.1:49374).
+# Data lives on the Mac side via the mounted /mnt/wiki, so nuke+up of the VM
+# preserves everything ai-memory remembers.
+#
+# Zero-LLM / zero-embedding mode: FTS5 search works; no consolidation or
+# semantic handoffs until we add an LLM provider env var.
+if ! sudo docker ps --format '{{.Names}}' | grep -qx ai-memory; then
+  log "starting ai-memory docker container"
+  sudo docker pull akitaonrails/ai-memory:latest
+  # Ensure Mac-side wiki dir looks like something ai-memory can own.
+  # Container runs as its own uid; we relax perms on the mount point only.
+  chmod 0777 /mnt/wiki 2>/dev/null || true
+  sudo docker run -d --name ai-memory \
+    --restart unless-stopped \
+    -p 127.0.0.1:49374:49374 \
+    -v /mnt/wiki:/data \
+    akitaonrails/ai-memory:latest
+fi
+
+# `install-mcp` / `install-hooks` are idempotent (they replace the ai-memory
+# entry, keep everything else, and back up the file with a .bak-<ts> suffix).
+if command -v ai-memory >/dev/null 2>&1; then
+  log "registering ai-memory MCP + lifecycle hooks with Claude Code"
+  ai-memory install-mcp   --client claude-code --apply || \
+    log "warning: install-mcp failed (server may still be starting)"
+  ai-memory install-hooks --agent  claude-code --project-strategy repo-root --apply || \
+    log "warning: install-hooks failed (server may still be starting)"
+fi
+
 # --- devbox-doctor -----------------------------------------------------------
 # Installed from the mounted repo so the VM always has the version that
 # matches this provision.sh. On subsequent runs we just re-copy it.
