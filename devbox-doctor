@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# devbox-doctor — verify that the devbox VM matches expectations.
+# Runs inside the VM. From the Mac, use ./doctor.sh which wraps this.
+#
+# Reports only; never mutates state. Exit codes:
+#   0 — all checks passed
+#   1 — at least one warning
+#   2 — at least one error
+
+set -uo pipefail
+
+VERBOSE=0
+for arg in "$@"; do
+  case "$arg" in
+    -v|--verbose) VERBOSE=1 ;;
+    -h|--help)
+      sed -n '2,12p' "${BASH_SOURCE[0]}"
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $arg" >&2
+      exit 2
+      ;;
+  esac
+done
+
+ERRORS=0
+WARNS=0
+DETAILS=()
+
+ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+warn() { printf '  \033[33m~\033[0m %s\n' "$1"; WARNS=$((WARNS+1)); [ -n "${2:-}" ] && DETAILS+=("WARN $1 — $2"); }
+err()  { printf '  \033[31m✗\033[0m %s\n' "$1"; ERRORS=$((ERRORS+1)); [ -n "${2:-}" ] && DETAILS+=("ERR  $1 — $2"); }
+section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+# Ensure the same PATH a real login shell would see. `limactl shell -- env`
+# strips PATH; without this, mise shims (node, claude) and ~/.local/bin
+# appear missing even though they exist.
+export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$HOME/.cargo/bin:$PATH"
+
+# ---- expected versions (fed from the Mac via env when wrapper is used) ----
+: "${EXPECTED_RUST_VERSION:=}"
+: "${EXPECTED_NODE_VERSION:=}"
+: "${EXPECTED_LAZYGIT_VERSION:=}"
+
+# ============================================================================
+# Level 1 — structural
+# ============================================================================
+section "structural"
+
+if [ -d /mnt/dev ]; then
+  if touch /mnt/dev/.doctor-write-test 2>/dev/null; then
+    rm -f /mnt/dev/.doctor-write-test
+    ok "/mnt/dev mounted (writable)"
+  else
+    err "/mnt/dev not writable" "check devbox.env DEV_ROOT + Lima mount config"
+  fi
+else
+  err "/mnt/dev missing" "Lima mount failed"
+fi
+
+if [ -d /mnt/wiki ]; then
+  if touch /mnt/wiki/.doctor-write-test 2>/dev/null; then
+    rm -f /mnt/wiki/.doctor-write-test
+    ok "/mnt/wiki mounted (writable)"
+  else
+    err "/mnt/wiki not writable" "check devbox.env WIKI_ROOT"
+  fi
+else
+  err "/mnt/wiki missing" "Lima mount failed"
+fi
+
+if ssh-add -l >/dev/null 2>&1; then
+  ok "ssh agent forwarding (key visible)"
+else
+  # This is a warning, not an error: the Mac's ssh-agent may be empty by
+  # design. What we can't tell from here is whether forwarding is broken or
+  # the Mac just has no keys loaded.
+  warn "no keys via SSH agent" "run 'ssh-add ~/.ssh/id_ed25519' on the Mac"
+fi
+
+if docker ps >/dev/null 2>&1; then
+  ok "docker socket accessible"
+else
+  err "docker not accessible" "user probably not in 'docker' group — reboot the VM"
+fi
+
+# ============================================================================
+# Level 2 — tools
+# ============================================================================
+section "tools"
+
+# Report a tool with its full first-line version. Optionally warn if a
+# specific expected version was passed and doesn't appear in the output.
+# Kept intentionally simple: no eval, no per-tool extractors — the first
+# line of --version is usually enough to identify the version at a glance,
+# and a substring match handles "expected".
+check_cmd() {
+  local cmd="$1"
+  local expected="${2:-}"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    err "$cmd missing" "not in PATH"
+    return
+  fi
+  local first_line
+  first_line="$("$cmd" --version 2>&1 | head -1)"
+  if [ -n "$expected" ] && ! echo "$first_line" | grep -q "$expected"; then
+    warn "$cmd — $first_line" "expected version containing '$expected'"
+  else
+    ok "$cmd — $first_line"
+  fi
+}
+
+check_cmd git
+check_cmd rustup
+check_cmd cargo    "$EXPECTED_RUST_VERSION"
+check_cmd mise
+check_cmd node     "$EXPECTED_NODE_VERSION"
+check_cmd nvim
+check_cmd lazygit  "$EXPECTED_LAZYGIT_VERSION"
+check_cmd docker
+check_cmd ai-jail
+check_cmd ai-memory
+check_cmd claude
+
+# ============================================================================
+# Level 3 — config applied
+# ============================================================================
+section "config"
+
+DEFAULT_SHELL="$(getent passwd "$USER" | cut -d: -f7)"
+if [ "$DEFAULT_SHELL" = "/usr/bin/zsh" ]; then
+  ok "default shell is zsh"
+else
+  err "default shell is $DEFAULT_SHELL" "expected /usr/bin/zsh"
+fi
+
+check_symlink() {
+  local path="$1"
+  local expected_target="$2"
+  if [ ! -L "$path" ]; then
+    err "$path is not a symlink"
+    return
+  fi
+  local actual
+  actual="$(readlink "$path")"
+  if [ "$actual" = "$expected_target" ]; then
+    ok "$path → $expected_target"
+  else
+    err "$path → $actual" "expected → $expected_target"
+  fi
+}
+
+check_symlink "$HOME/.zshrc"            "$HOME/repos/dotfiles/linux/.zshrc"
+check_symlink "$HOME/.gitconfig"        "$HOME/repos/dotfiles/common/.gitconfig"
+check_symlink "$HOME/.config/nvim"      "$HOME/repos/nvim-config"
+check_symlink "$HOME/projects"          "/mnt/dev"
+check_symlink "$HOME/wiki"              "/mnt/wiki"
+
+USERNS="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)"
+if [ "$USERNS" = "0" ]; then
+  ok "apparmor_restrict_unprivileged_userns=0 (bwrap enabled)"
+else
+  err "apparmor_restrict_unprivileged_userns=$USERNS" "bwrap (ai-jail) will fail"
+fi
+
+if id -nG "$USER" | tr ' ' '\n' | grep -qx docker; then
+  ok "$USER is in the docker group"
+else
+  err "$USER not in docker group" "run: sudo usermod -aG docker $USER; then reboot"
+fi
+
+# ============================================================================
+# Level 4 — services alive
+# ============================================================================
+section "services alive"
+
+if docker info >/dev/null 2>&1; then
+  ok "docker info responds"
+else
+  err "docker info failed" "daemon not running or unreachable"
+fi
+
+if ai-jail --version >/dev/null 2>&1; then
+  ok "ai-jail runs"
+else
+  err "ai-jail failed to run"
+fi
+
+if ai-memory --version >/dev/null 2>&1; then
+  ok "ai-memory runs"
+else
+  err "ai-memory failed to run" "usually means docker access is broken"
+fi
+
+if claude --version >/dev/null 2>&1; then
+  ok "claude runs"
+else
+  err "claude failed to run"
+fi
+
+# nvim: don't run headless (LazyVim triggers a full plugin sync on first
+# start, which floods stdout for 30+s). Just confirm the binary responds.
+if nvim --version >/dev/null 2>&1; then
+  ok "nvim responds"
+else
+  err "nvim broken"
+fi
+
+# ============================================================================
+# summary
+# ============================================================================
+echo
+
+if [ "$VERBOSE" = "1" ] && [ "${#DETAILS[@]}" -gt 0 ]; then
+  section "details"
+  for d in "${DETAILS[@]}"; do echo "  $d"; done
+  echo
+fi
+
+if [ "$ERRORS" -gt 0 ]; then
+  printf '\033[31m%d error(s), %d warning(s)\033[0m\n' "$ERRORS" "$WARNS"
+  exit 2
+fi
+if [ "$WARNS" -gt 0 ]; then
+  printf '\033[33m%d warning(s)\033[0m\n' "$WARNS"
+  exit 1
+fi
+printf '\033[32mall checks passed\033[0m\n'
+exit 0

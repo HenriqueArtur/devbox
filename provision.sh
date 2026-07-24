@@ -48,7 +48,8 @@ fi
 # --- Rust (pinned) -----------------------------------------------------------
 if ! command -v rustup >/dev/null 2>&1; then
   log "installing rustup"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+  curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 5 --retry-all-errors \
+    --max-time 120 https://sh.rustup.rs \
     | sh -s -- -y --default-toolchain "$RUST_VERSION" --profile minimal
 fi
 # shellcheck disable=SC1091
@@ -60,7 +61,8 @@ rustup component add rust-analyzer clippy rustfmt
 # --- mise + Node (pinned) ----------------------------------------------------
 if ! command -v mise >/dev/null 2>&1; then
   log "installing mise"
-  curl https://mise.run | sh
+  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --max-time 120 \
+    https://mise.run | sh
 fi
 export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
 eval "$(mise activate bash)"
@@ -76,7 +78,8 @@ if ! command -v nvim >/dev/null 2>&1 || \
     aarch64) nvim_url="https://github.com/neovim/neovim/releases/latest/download/nvim-linux-arm64.appimage" ;;
     *) log "unsupported arch for nvim: $arch"; exit 1 ;;
   esac
-  sudo curl -fsSL -o /usr/local/bin/nvim "$nvim_url"
+  sudo curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --max-time 300 \
+    -o /usr/local/bin/nvim "$nvim_url"
   sudo chmod +x /usr/local/bin/nvim
 fi
 
@@ -94,7 +97,7 @@ if [ "$lazygit_installed" != "$LAZYGIT_VERSION" ]; then
     *) log "unsupported arch for lazygit: $arch"; exit 1 ;;
   esac
   tmp="$(mktemp -d)"
-  curl -fsSL -o "$tmp/lg.tar.gz" \
+  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --max-time 300 -o "$tmp/lg.tar.gz" \
     "https://github.com/jesseduffield/lazygit/releases/download/v${LAZYGIT_VERSION}/lazygit_${LAZYGIT_VERSION}_Linux_${lg_arch}.tar.gz"
   tar -xf "$tmp/lg.tar.gz" -C "$tmp" lazygit
   mkdir -p "$HOME/.local/bin"
@@ -108,7 +111,7 @@ if ! command -v docker >/dev/null 2>&1; then
   sudo apt-get update
   sudo apt-get install -y ca-certificates curl gnupg
   sudo install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --max-time 300 https://download.docker.com/linux/ubuntu/gpg \
     | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   sudo chmod a+r /etc/apt/keyrings/docker.gpg
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
@@ -154,7 +157,7 @@ fi
 if [ ! -f "$HOME/.local/bin/ai-memory" ]; then
   log "installing ai-memory wrapper (akitaonrails/ai-memory)"
   mkdir -p "$HOME/.local/bin"
-  curl -fsSL \
+  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --max-time 300 \
     -o "$HOME/.local/bin/ai-memory" \
     https://raw.githubusercontent.com/akitaonrails/ai-memory/main/bin/ai-memory
   chmod +x "$HOME/.local/bin/ai-memory"
@@ -166,5 +169,19 @@ if ! command -v claude >/dev/null 2>&1; then
   npm install -g @anthropic-ai/claude-code
 fi
 
-log "done. open a new shell (or 'exec zsh') to pick up PATH + shell changes."
-log "note: docker group membership requires a fresh login to take effect."
+# --- devbox-doctor -----------------------------------------------------------
+# Installed from the mounted repo so the VM always has the version that
+# matches this provision.sh. On subsequent runs we just re-copy it.
+if [ -f /mnt/dev/devbox/devbox-doctor ]; then
+  install -m 0755 /mnt/dev/devbox/devbox-doctor "$HOME/.local/bin/devbox-doctor"
+else
+  log "warning: /mnt/dev/devbox/devbox-doctor not found — is DEV_ROOT correct?"
+fi
+
+# --- Sentinel ----------------------------------------------------------------
+# up.sh reads this to know provisioning finished, then reboots the VM from
+# the OUTSIDE so `sudo usermod -aG docker $USER` (above) takes effect in
+# every future shell. Rebooting from inside cloud-init confuses Lima's
+# start-up state machine and fails the initial `limactl start`.
+touch "$HOME/.provision-done"
+log "provision complete. up.sh will restart the VM to activate docker group."
