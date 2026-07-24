@@ -82,7 +82,7 @@ if [ ! -d "$DOTFILES_DIR" ]; then
   log "cloning dotfiles"
   git clone "$DOTFILES_REPO" "$DOTFILES_DIR"
 fi
-( cd "$DOTFILES_DIR" && ./install.sh )
+( cd "$DOTFILES_DIR" && ./install.sh --force )
 
 # --- nvim-config -------------------------------------------------------------
 NVIM_CONFIG_DIR="$REPOS_DIR/nvim-config"
@@ -92,7 +92,9 @@ if [ ! -d "$NVIM_CONFIG_DIR" ]; then
 fi
 # nvim-config's own installer handles apt deps + symlink.
 # Since we already installed nvim/ripgrep/fd/git, this mostly just symlinks.
-( cd "$NVIM_CONFIG_DIR" && ./install.sh )
+( cd "$NVIM_CONFIG_DIR" && ./install.sh || true )
+# nvim-config's installer runs apt on Linux and expects a package manager it
+# knows; we already installed the deps above, so tolerate its failure here.
 
 # --- ai-jail (from cargo) ----------------------------------------------------
 if ! command -v ai-jail >/dev/null 2>&1; then
