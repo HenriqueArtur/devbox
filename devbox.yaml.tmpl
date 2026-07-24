@@ -1,0 +1,77 @@
+# devbox.yaml.tmpl — Lima VM template.
+# Rendered by ./up.sh into devbox.yaml (gitignored) via envsubst.
+#
+# Do not edit devbox.yaml directly — edit this template and re-run ./up.sh.
+# See README.md for the variable list.
+
+vmType: "vz"           # macOS Virtualization.framework — fast, low overhead on Apple Silicon
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/${UBUNTU_VERSION}/release/ubuntu-${UBUNTU_VERSION}-server-cloudimg-amd64.img"
+    arch: "x86_64"
+  - location: "https://cloud-images.ubuntu.com/releases/${UBUNTU_VERSION}/release/ubuntu-${UBUNTU_VERSION}-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+cpus: ${CPUS}
+memory: "${MEMORY}"
+disk: "${DISK}"
+
+mounts:
+  - location: "${DEV_ROOT}"
+    mountPoint: "/mnt/dev"
+    writable: true
+  - location: "${WIKI_ROOT}"
+    mountPoint: "/mnt/wiki"
+    writable: true
+
+mountType: "virtiofs"  # fastest option on Apple Silicon; requires vmType=vz
+
+ssh:
+  loadDotSSHPubKeys: true   # ~/.ssh/*.pub is added to the VM's authorized_keys
+  forwardAgent: true        # SSH-agent forwarding: `git push` in the VM uses
+                            # the Mac's key without copying it in
+
+# Environment variables set at provision time so provision.sh can read them.
+env:
+  RUST_VERSION: "${RUST_VERSION}"
+  NODE_VERSION: "${NODE_VERSION}"
+  LAZYGIT_VERSION: "${LAZYGIT_VERSION}"
+  DOTFILES_REPO: "${DOTFILES_REPO}"
+  NVIM_CONFIG_REPO: "${NVIM_CONFIG_REPO}"
+
+# Provisioning runs on first boot. Idempotent — safe to re-run via
+# `limactl start --format=json ${VM_NAME}` followed by re-provisioning.
+provision:
+  # System-wide setup (root).
+  - mode: system
+    script: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y \
+        build-essential curl git unzip ca-certificates \
+        ripgrep fd-find \
+        zsh \
+        xclip \
+        pkg-config libssl-dev
+      # Ubuntu ships fd as `fdfind`; add a `fd` alias binary.
+      ln -sf /usr/bin/fdfind /usr/local/bin/fd || true
+      # Make zsh the default shell for the lima user.
+      chsh -s /usr/bin/zsh lima || true
+
+  # User-level setup (runs as the `lima` user).
+  - mode: user
+    script: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+
+      # Copy provision.sh into the VM and run it. The script does the heavy
+      # lifting (rustup, mise, node, neovim, dotfiles, agents) so this YAML
+      # stays small and the logic is readable in a normal shell file.
+      if [ -f /mnt/dev/devbox/provision.sh ]; then
+        bash /mnt/dev/devbox/provision.sh
+      else
+        echo "[provision] /mnt/dev/devbox/provision.sh not found — skipping user provision"
+        echo "[provision] make sure DEV_ROOT points to the parent of the devbox repo"
+      fi

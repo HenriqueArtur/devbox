@@ -1,0 +1,7 @@
+# Local, per-machine config.
+devbox.env
+
+# Rendered from devbox.yaml.tmpl by up.sh.
+devbox.yaml
+
+.DS_Store
