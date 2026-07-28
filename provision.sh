@@ -193,19 +193,27 @@ fi
 # accept it explicitly because we want git/gh usable during agent sessions.
 if [ ! -f "$HOME/.ai-jail" ]; then
   log "writing global ~/.ai-jail (SSH agent + gh auth passthrough)"
-  cat > "$HOME/.ai-jail" <<'TOML'
-# Global ai-jail config. Applies to every invocation of `ai-jail` in this
-# user account; per-project `.ai-jail` in a repo root takes precedence.
+  # Compute the current SSH agent socket dir on the Mac-forwarded agent,
+  # so we can rw-map its parent (ai-jail does not expand env vars inside
+  # rw_maps — it treats them as literal paths).
+  ssh_sock_dir=""
+  if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -e "$SSH_AUTH_SOCK" ]; then
+    ssh_sock_dir="$(dirname "$SSH_AUTH_SOCK")"
+  fi
+  cat > "$HOME/.ai-jail" <<TOML
+# Global ai-jail config. Applies to every invocation of \`ai-jail\` in this
+# user account; per-project \`.ai-jail\` in a repo root takes precedence.
 #
-# Managed by devbox provision.sh. Edit freely, but note that a `nuke.sh` +
-# `up.sh` will overwrite this file.
+# Managed by devbox provision.sh. Edit freely, but note that a \`nuke.sh\` +
+# \`up.sh\` will overwrite this file.
 
-# Forward the SSH agent socket from outside the jail so `git push` uses the
-# Mac's identity (Lima already forwards the Mac agent into the VM).
+# Forward SSH_AUTH_SOCK env into the jail so \`git push\` sees an agent.
 env_passthrough = ["SSH_AUTH_SOCK"]
-
-# Expose the socket file itself, read-write, at the same path inside.
-rw_maps = ["$SSH_AUTH_SOCK"]
+$( [ -n "$ssh_sock_dir" ] && echo "
+# Expose the agent socket's directory so the socket path is reachable
+# inside the jail. Path resolved at provision time — ai-jail does not
+# expand \\\$SSH_AUTH_SOCK inside rw_maps.
+rw_maps = [\"$ssh_sock_dir\"]" )
 
 # Persist gh's auth token across sessions.
 [commands.claude]
