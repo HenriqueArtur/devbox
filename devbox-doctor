@@ -146,6 +146,8 @@ check_symlink() {
 
 check_symlink "$HOME/.zshrc"       "$HOME/repos/dotfiles/linux/.zshrc"
 check_symlink "$HOME/.zshenv"      "$HOME/repos/dotfiles/linux/.zshenv"
+check_symlink "$HOME/.bashrc"      "$HOME/repos/dotfiles/linux/.bashrc"
+check_symlink "$HOME/.profile"     "$HOME/repos/dotfiles/linux/.profile"
 check_symlink "$HOME/.gitconfig"   "$HOME/repos/dotfiles/common/.gitconfig"
 check_symlink "$HOME/.config/nvim" "$HOME/repos/nvim-config"
 check_symlink "$HOME/projects"     "/mnt/dev"
