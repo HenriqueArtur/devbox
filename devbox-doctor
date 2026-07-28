@@ -28,9 +28,9 @@ ERRORS=0
 WARNS=0
 DETAILS=()
 
-ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
-warn() { printf '  \033[33m~\033[0m %s\n' "$1"; WARNS=$((WARNS+1)); [ -n "${2:-}" ] && DETAILS+=("WARN $1 — $2"); }
-err()  { printf '  \033[31m✗\033[0m %s\n' "$1"; ERRORS=$((ERRORS+1)); [ -n "${2:-}" ] && DETAILS+=("ERR  $1 — $2"); }
+ok()      { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+warn()    { printf '  \033[33m~\033[0m %s\n' "$1"; WARNS=$((WARNS+1)); [ -n "${2:-}" ] && DETAILS+=("WARN $1 — $2"); }
+err()     { printf '  \033[31m✗\033[0m %s\n' "$1"; ERRORS=$((ERRORS+1)); [ -n "${2:-}" ] && DETAILS+=("ERR  $1 — $2"); }
 section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 # Ensure the same PATH a real login shell would see. `limactl shell -- env`
@@ -59,23 +59,17 @@ else
   err "/mnt/dev missing" "Lima mount failed"
 fi
 
-if [ -d /mnt/wiki ]; then
-  if touch /mnt/wiki/.doctor-write-test 2>/dev/null; then
-    rm -f /mnt/wiki/.doctor-write-test
-    ok "/mnt/wiki mounted (writable)"
-  else
-    err "/mnt/wiki not writable" "check devbox.env WIKI_ROOT"
-  fi
+if [ -d /mnt/tooling ]; then
+  ok "/mnt/tooling mounted (devbox repo)"
 else
-  err "/mnt/wiki missing" "Lima mount failed"
+  err "/mnt/tooling missing" "check devbox.env PROVISION_ROOT"
 fi
 
 if ssh-add -l >/dev/null 2>&1; then
   ok "ssh agent forwarding (key visible)"
 else
-  # This is a warning, not an error: the Mac's ssh-agent may be empty by
-  # design. What we can't tell from here is whether forwarding is broken or
-  # the Mac just has no keys loaded.
+  # Warning, not error: the Mac's ssh-agent may be empty by design. We can't
+  # tell from here whether forwarding is broken or the Mac just has no keys.
   warn "no keys via SSH agent" "run 'ssh-add ~/.ssh/id_ed25519' on the Mac"
 fi
 
@@ -90,11 +84,9 @@ fi
 # ============================================================================
 section "tools"
 
-# Report a tool with its full first-line version. Optionally warn if a
-# specific expected version was passed and doesn't appear in the output.
-# Kept intentionally simple: no eval, no per-tool extractors — the first
-# line of --version is usually enough to identify the version at a glance,
-# and a substring match handles "expected".
+# Simple version check: first line of --version. Optional substring match
+# against an expected version. Uses actual exit code so a command that
+# prints an error but returns 0 is spotted separately in "services alive".
 check_cmd() {
   local cmd="$1"
   local expected="${2:-}"
@@ -112,6 +104,8 @@ check_cmd() {
 }
 
 check_cmd git
+check_cmd gh
+check_cmd gcloud
 check_cmd rustup
 check_cmd cargo    "$EXPECTED_RUST_VERSION"
 check_cmd mise
@@ -120,7 +114,6 @@ check_cmd nvim
 check_cmd lazygit  "$EXPECTED_LAZYGIT_VERSION"
 check_cmd docker
 check_cmd ai-jail
-check_cmd ai-memory
 check_cmd claude
 
 # ============================================================================
@@ -151,11 +144,10 @@ check_symlink() {
   fi
 }
 
-check_symlink "$HOME/.zshrc"            "$HOME/repos/dotfiles/linux/.zshrc"
-check_symlink "$HOME/.gitconfig"        "$HOME/repos/dotfiles/common/.gitconfig"
-check_symlink "$HOME/.config/nvim"      "$HOME/repos/nvim-config"
-check_symlink "$HOME/projects"          "/mnt/dev"
-check_symlink "$HOME/wiki"              "/mnt/wiki"
+check_symlink "$HOME/.zshrc"       "$HOME/repos/dotfiles/linux/.zshrc"
+check_symlink "$HOME/.gitconfig"   "$HOME/repos/dotfiles/common/.gitconfig"
+check_symlink "$HOME/.config/nvim" "$HOME/repos/nvim-config"
+check_symlink "$HOME/projects"     "/mnt/dev"
 
 USERNS="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)"
 if [ "$USERNS" = "0" ]; then
@@ -168,6 +160,12 @@ if id -nG "$USER" | tr ' ' '\n' | grep -qx docker; then
   ok "$USER is in the docker group"
 else
   err "$USER not in docker group" "run: sudo usermod -aG docker $USER; then reboot"
+fi
+
+if [ -f "$HOME/.ai-jail" ] && grep -q 'SSH_AUTH_SOCK' "$HOME/.ai-jail" 2>/dev/null; then
+  ok "~/.ai-jail configured with SSH agent passthrough"
+else
+  err "~/.ai-jail missing SSH agent passthrough" "re-run provision.sh"
 fi
 
 # ============================================================================
@@ -187,12 +185,6 @@ else
   err "ai-jail failed to run"
 fi
 
-if ai-memory --version >/dev/null 2>&1; then
-  ok "ai-memory runs"
-else
-  err "ai-memory failed to run" "usually means docker access is broken"
-fi
-
 if claude --version >/dev/null 2>&1; then
   ok "claude runs"
 else
@@ -207,36 +199,20 @@ else
   err "nvim broken"
 fi
 
-# ai-memory server: container running + loopback endpoint responding.
-if sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -qx ai-memory; then
-  ok "ai-memory container running"
+# gh: --version works even without auth. `gh auth status` warns when
+# unauthenticated — that's a hint, not an error, because the user might
+# not have logged this VM in yet.
+if gh auth status >/dev/null 2>&1; then
+  ok "gh authenticated"
 else
-  err "ai-memory container not running" "run: sudo docker start ai-memory"
-fi
-# Any HTTP response (even 404) proves the server is bound and answering;
-# 000 means connection refused / no listener.
-HTTP_CODE="$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' \
-  http://127.0.0.1:49374/ 2>/dev/null || echo 000)"
-if [ "$HTTP_CODE" != "000" ]; then
-  ok "ai-memory server bound on 127.0.0.1:49374 (HTTP $HTTP_CODE)"
-else
-  warn "ai-memory server not answering on 127.0.0.1:49374" \
-       "container may still be starting; retry in a few seconds"
+  warn "gh not authenticated" "run 'gh auth login' inside the VM"
 fi
 
-# Claude Code integration: MCP entry + hooks.
-CLAUDE_CFG="$HOME/.claude.json"
-CLAUDE_HOOKS="$HOME/.claude/settings.json"
-if [ -f "$CLAUDE_CFG" ] && grep -q '"ai-memory"' "$CLAUDE_CFG" 2>/dev/null; then
-  ok "ai-memory MCP registered in ~/.claude.json"
+# gcloud: same idea — warn on missing auth, don't error.
+if gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>/dev/null | grep -q .; then
+  ok "gcloud authenticated"
 else
-  err "ai-memory MCP NOT registered" "run: ai-memory install-mcp --client claude-code --apply"
-fi
-if [ -f "$CLAUDE_HOOKS" ] && grep -q 'ai-memory' "$CLAUDE_HOOKS" 2>/dev/null; then
-  ok "ai-memory lifecycle hooks installed"
-else
-  err "ai-memory hooks NOT installed" \
-      "run: ai-memory install-hooks --agent claude-code --project-strategy repo-root --apply"
+  warn "gcloud not authenticated" "run 'gcloud auth login' inside the VM"
 fi
 
 # ============================================================================

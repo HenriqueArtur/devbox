@@ -1,7 +1,7 @@
 # devbox.yaml.tmpl — Lima VM template.
-# Rendered by ./up.sh into devbox.yaml (gitignored) via envsubst.
+# Rendered by ./up.sh into devbox[.<profile>].yaml (gitignored) via envsubst.
 #
-# Do not edit devbox.yaml directly — edit this template and re-run ./up.sh.
+# Do not edit the rendered YAML directly — edit this template and re-run ./up.sh.
 # See README.md for the variable list.
 
 vmType: "vz"           # macOS Virtualization.framework — fast, low overhead on Apple Silicon
@@ -17,12 +17,16 @@ memory: "${MEMORY}"
 disk: "${DISK}"
 
 mounts:
+  # This profile's project code. Different profiles point at different Mac
+  # subdirs to keep contexts isolated.
   - location: "${DEV_ROOT}"
     mountPoint: "/mnt/dev"
     writable: true
-  - location: "${WIKI_ROOT}"
-    mountPoint: "/mnt/wiki"
-    writable: true
+  # devbox repo itself — Lima's user-mode provision hook reads provision.sh
+  # from here. Same path across every profile; only /mnt/dev differs.
+  - location: "${PROVISION_ROOT}"
+    mountPoint: "/mnt/tooling"
+    writable: false
 
 mountType: "virtiofs"  # fastest option on Apple Silicon; requires vmType=vz
 
@@ -39,8 +43,7 @@ env:
   DOTFILES_REPO: "${DOTFILES_REPO}"
   NVIM_CONFIG_REPO: "${NVIM_CONFIG_REPO}"
 
-# Provisioning runs on first boot. Idempotent — safe to re-run via
-# `limactl start --format=json ${VM_NAME}` followed by re-provisioning.
+# Provisioning runs on first boot. provision.sh is idempotent — safe to re-run.
 provision:
   # System-wide setup (root).
   - mode: system
@@ -57,21 +60,17 @@ provision:
         pkg-config libssl-dev
       # Ubuntu ships fd as `fdfind`; add a `fd` alias binary.
       ln -sf /usr/bin/fdfind /usr/local/bin/fd || true
-      # Make zsh the default shell for the lima user.
-      chsh -s /usr/bin/zsh lima || true
 
-  # User-level setup (runs as the `lima` user).
+  # User-level setup runs the mounted provision.sh, which does all the heavy
+  # lifting (rustup, mise, node, neovim, dotfiles, agents) in a normal shell
+  # file that is easier to read and debug than YAML-embedded here-docs.
   - mode: user
     script: |
       #!/usr/bin/env bash
       set -euxo pipefail
-
-      # Copy provision.sh into the VM and run it. The script does the heavy
-      # lifting (rustup, mise, node, neovim, dotfiles, agents) so this YAML
-      # stays small and the logic is readable in a normal shell file.
-      if [ -f /mnt/dev/devbox/provision.sh ]; then
-        bash /mnt/dev/devbox/provision.sh
+      if [ -f /mnt/tooling/provision.sh ]; then
+        bash /mnt/tooling/provision.sh
       else
-        echo "[provision] /mnt/dev/devbox/provision.sh not found — skipping user provision"
-        echo "[provision] make sure DEV_ROOT points to the parent of the devbox repo"
+        echo "[provision] /mnt/tooling/provision.sh not found — PROVISION_ROOT wrong?"
+        exit 1
       fi

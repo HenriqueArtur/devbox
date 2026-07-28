@@ -1,7 +1,11 @@
 # Local, per-machine config.
+# Covers both the default profile (devbox.env) and named profiles
+# (devbox.<profile>.env, e.g. devbox.sunne.env).
 devbox.env
+devbox.*.env
 
-# Rendered from devbox.yaml.tmpl by up.sh.
+# Rendered from devbox.yaml.tmpl by up.sh; same pattern per profile.
 devbox.yaml
+devbox.*.yaml
 
 .DS_Store

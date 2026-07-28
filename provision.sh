@@ -18,9 +18,9 @@ REPOS_DIR="$HOME/repos"
 mkdir -p "$REPOS_DIR"
 
 # --- Default shell = zsh -----------------------------------------------------
-# Lima's virtual user (username_guest) defaults to /bin/bash. Our dotfiles
-# target zsh, and `mise activate` in .zshrc is what puts npm-installed
-# binaries (claude, etc) on PATH.
+# Lima's virtual user defaults to /bin/bash. Our dotfiles target zsh, and
+# `mise activate` in .zshrc is what puts npm-installed binaries (claude,
+# gemini, etc) on PATH.
 CURRENT_SHELL="$(getent passwd "$USER" | cut -d: -f7)"
 if [ "$CURRENT_SHELL" != "/usr/bin/zsh" ]; then
   log "setting default shell to zsh for $USER"
@@ -28,15 +28,13 @@ if [ "$CURRENT_SHELL" != "/usr/bin/zsh" ]; then
 fi
 
 # --- Convenience symlinks to Mac-side mounts --------------------------------
-# ~/projects  → /mnt/dev   (your code)
-# ~/wiki      → /mnt/wiki  (ai-memory's shared wiki)
-ln -sfn /mnt/dev  "$HOME/projects"
-ln -sfn /mnt/wiki "$HOME/wiki"
+# ~/projects → /mnt/dev  (your code, scoped to this profile's DEV_ROOT)
+ln -sfn /mnt/dev "$HOME/projects"
 
 # --- Enable unprivileged user namespaces (required by ai-jail's bwrap) ------
 # Ubuntu 24.04's default AppArmor policy denies user-namespace creation for
 # unprivileged users. Every tool that uses rootless user namespaces breaks:
-# ai-jail (bwrap), rootless podman, flatpak, distrobox. We're inside a
+# ai-jail (bwrap), rootless podman, flatpak, distrobox. We are inside a
 # dedicated Lima VM — the extra isolation is redundant with the VM boundary.
 if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != "0" ]; then
   log "relaxing apparmor_restrict_unprivileged_userns (bwrap needs it)"
@@ -105,7 +103,8 @@ if [ "$lazygit_installed" != "$LAZYGIT_VERSION" ]; then
   rm -rf "$tmp"
 fi
 
-# --- Docker Engine (needed by akitaonrails/ai-memory) -----------------------
+# --- Docker Engine (kept even without ai-memory: useful for local Postgres,
+# Redis, Playwright browsers, etc). ------------------------------------------
 if ! command -v docker >/dev/null 2>&1; then
   log "installing docker engine"
   sudo apt-get update
@@ -124,6 +123,41 @@ if ! command -v docker >/dev/null 2>&1; then
   sudo systemctl enable --now docker
 fi
 
+# --- GitHub CLI (gh) --------------------------------------------------------
+# From the official GitHub apt repository, not the distro package which lags.
+if ! command -v gh >/dev/null 2>&1; then
+  log "installing gh (GitHub CLI)"
+  sudo mkdir -p /etc/apt/keyrings
+  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --max-time 300 \
+    https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | sudo dd of=/etc/apt/keyrings/githubcli-archive-keyring.gpg
+  sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+  sudo apt-get update
+  sudo apt-get install -y gh
+fi
+
+# --- Google Cloud CLI (gcloud) ----------------------------------------------
+# Full SDK matches the Mac install (`brew install --cask gcloud-cli`) — same
+# gcloud + bq + gsutil + bundled Python. GKE-auth-plugin and kubectl are NOT
+# installed: add them later if you start using GKE.
+#
+# Ai-jail does NOT expose ~/.config/gcloud by default (unlike ~/.config/gh).
+# Rationale: gcloud can create/delete paid infra irreversibly, so each
+# agent session opts in explicitly with `ai-jail --rw-map ~/.config/gcloud`.
+if ! command -v gcloud >/dev/null 2>&1; then
+  log "installing google-cloud-cli"
+  sudo mkdir -p /etc/apt/keyrings
+  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --max-time 300 \
+    https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+    | sudo gpg --dearmor -o /etc/apt/keyrings/cloud.google.gpg
+  echo "deb [signed-by=/etc/apt/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+    | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list >/dev/null
+  sudo apt-get update
+  sudo apt-get install -y google-cloud-cli
+fi
+
 # --- dotfiles ----------------------------------------------------------------
 DOTFILES_DIR="$REPOS_DIR/dotfiles"
 if [ ! -d "$DOTFILES_DIR" ]; then
@@ -138,9 +172,8 @@ if [ ! -d "$NVIM_CONFIG_DIR" ]; then
   log "cloning nvim-config"
   git clone "$NVIM_CONFIG_REPO" "$NVIM_CONFIG_DIR"
 fi
-# nvim-config's installer re-runs apt for a set of deps we already installed
-# above. Its non-zero exit is not fatal — the symlink step (which is what we
-# actually need) still runs.
+# nvim-config's installer re-runs apt for a set of deps we already installed.
+# Its non-zero exit is not fatal — the symlink step (what we need) still runs.
 ( cd "$NVIM_CONFIG_DIR" && ./install.sh || true )
 
 # --- ai-jail (from cargo) ----------------------------------------------------
@@ -150,17 +183,37 @@ if ! command -v ai-jail >/dev/null 2>&1; then
   cargo install ai-jail
 fi
 
-# --- ai-memory (akitaonrails, Docker-wrapped) --------------------------------
-# The crate `ai-memory` on crates.io is a different unrelated tool. The one
-# we want is akitaonrails/ai-memory, distributed as a shell wrapper that
-# runs the server in Docker.
-if [ ! -f "$HOME/.local/bin/ai-memory" ]; then
-  log "installing ai-memory wrapper (akitaonrails/ai-memory)"
-  mkdir -p "$HOME/.local/bin"
-  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --max-time 300 \
-    -o "$HOME/.local/bin/ai-memory" \
-    https://raw.githubusercontent.com/akitaonrails/ai-memory/main/bin/ai-memory
-  chmod +x "$HOME/.local/bin/ai-memory"
+# --- Global ai-jail config: forward SSH agent + gh auth ---------------------
+# ~/.ai-jail applies to every project inside this VM (per-project .ai-jail
+# still overrides it). We expose:
+#   - SSH_AUTH_SOCK from the Mac (Lima already forwards it into the VM) so
+#     `git push` works via the Mac's identity from inside the jail.
+#   - ~/.config/gh so gh auth persists across ai-jail sessions.
+# See ai-jail's README "Security notes" — this widens the sandbox surface;
+# accept it explicitly because we want git/gh usable during agent sessions.
+if [ ! -f "$HOME/.ai-jail" ]; then
+  log "writing global ~/.ai-jail (SSH agent + gh auth passthrough)"
+  cat > "$HOME/.ai-jail" <<'TOML'
+# Global ai-jail config. Applies to every invocation of `ai-jail` in this
+# user account; per-project `.ai-jail` in a repo root takes precedence.
+#
+# Managed by devbox provision.sh. Edit freely, but note that a `nuke.sh` +
+# `up.sh` will overwrite this file.
+
+# Forward the SSH agent socket from outside the jail so `git push` uses the
+# Mac's identity (Lima already forwards the Mac agent into the VM).
+env_passthrough = ["SSH_AUTH_SOCK"]
+
+# Expose the socket file itself, read-write, at the same path inside.
+rw_maps = ["$SSH_AUTH_SOCK"]
+
+# Persist gh's auth token across sessions.
+[commands.claude]
+rw_maps = ["~/.config/gh"]
+
+[commands.gh]
+rw_maps = ["~/.config/gh"]
+TOML
 fi
 
 # --- Claude Code CLI ---------------------------------------------------------
@@ -169,43 +222,13 @@ if ! command -v claude >/dev/null 2>&1; then
   npm install -g @anthropic-ai/claude-code
 fi
 
-# --- ai-memory server + Claude Code integration -----------------------------
-# Server runs as a Docker container bound to loopback (127.0.0.1:49374).
-# Data lives on the Mac side via the mounted /mnt/wiki, so nuke+up of the VM
-# preserves everything ai-memory remembers.
-#
-# Zero-LLM / zero-embedding mode: FTS5 search works; no consolidation or
-# semantic handoffs until we add an LLM provider env var.
-if ! sudo docker ps --format '{{.Names}}' | grep -qx ai-memory; then
-  log "starting ai-memory docker container"
-  sudo docker pull akitaonrails/ai-memory:latest
-  # Ensure Mac-side wiki dir looks like something ai-memory can own.
-  # Container runs as its own uid; we relax perms on the mount point only.
-  chmod 0777 /mnt/wiki 2>/dev/null || true
-  sudo docker run -d --name ai-memory \
-    --restart unless-stopped \
-    -p 127.0.0.1:49374:49374 \
-    -v /mnt/wiki:/data \
-    akitaonrails/ai-memory:latest
-fi
-
-# `install-mcp` / `install-hooks` are idempotent (they replace the ai-memory
-# entry, keep everything else, and back up the file with a .bak-<ts> suffix).
-if command -v ai-memory >/dev/null 2>&1; then
-  log "registering ai-memory MCP + lifecycle hooks with Claude Code"
-  ai-memory install-mcp   --client claude-code --apply || \
-    log "warning: install-mcp failed (server may still be starting)"
-  ai-memory install-hooks --agent  claude-code --project-strategy repo-root --apply || \
-    log "warning: install-hooks failed (server may still be starting)"
-fi
-
 # --- devbox-doctor -----------------------------------------------------------
-# Installed from the mounted repo so the VM always has the version that
+# Installed from the tooling mount so the VM always has the version that
 # matches this provision.sh. On subsequent runs we just re-copy it.
-if [ -f /mnt/dev/devbox/devbox-doctor ]; then
-  install -m 0755 /mnt/dev/devbox/devbox-doctor "$HOME/.local/bin/devbox-doctor"
+if [ -f /mnt/tooling/devbox-doctor ]; then
+  install -m 0755 /mnt/tooling/devbox-doctor "$HOME/.local/bin/devbox-doctor"
 else
-  log "warning: /mnt/dev/devbox/devbox-doctor not found — is DEV_ROOT correct?"
+  log "warning: /mnt/tooling/devbox-doctor not found — is PROVISION_ROOT correct?"
 fi
 
 # --- Sentinel ----------------------------------------------------------------
