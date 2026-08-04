@@ -38,10 +38,13 @@ section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 # appear missing even though they exist.
 export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$HOME/.cargo/bin:$PATH"
 
-# ---- expected versions (fed from the Mac via env when wrapper is used) ----
+# ---- expected values (fed from the Mac via env when wrapper is used) ----
 : "${EXPECTED_RUST_VERSION:=}"
 : "${EXPECTED_NODE_VERSION:=}"
 : "${EXPECTED_LAZYGIT_VERSION:=}"
+# Per-profile opt-in: only check flyctl on profiles that asked for it.
+: "${EXPECTED_INSTALL_FLYCTL:=0}"
+: "${EXPECTED_FLYCTL_VERSION:=}"
 
 # ============================================================================
 # Level 1 — structural
@@ -63,6 +66,17 @@ if [ -d /mnt/tooling ]; then
   ok "/mnt/tooling mounted (devbox repo)"
 else
   err "/mnt/tooling missing" "check devbox.env PROVISION_ROOT"
+fi
+
+if [ -d /mnt/state ]; then
+  if touch /mnt/state/.doctor-write-test 2>/dev/null; then
+    rm -f /mnt/state/.doctor-write-test
+    ok "/mnt/state mounted (writable, survives nuke.sh)"
+  else
+    err "/mnt/state not writable" "check STATE_ROOT + 'writable: true' in the mount"
+  fi
+else
+  err "/mnt/state missing" "set STATE_ROOT in this profile's .env, then ./up.sh"
 fi
 
 if ssh-add -l >/dev/null 2>&1; then
@@ -113,8 +127,16 @@ check_cmd node     "$EXPECTED_NODE_VERSION"
 check_cmd nvim
 check_cmd lazygit  "$EXPECTED_LAZYGIT_VERSION"
 check_cmd docker
-check_cmd ai-jail
 check_cmd claude
+check_cmd bwrap
+
+if [ "$EXPECTED_INSTALL_FLYCTL" = "1" ]; then
+  # flyctl prints "flyctl v0.4.78 linux/arm64 ...", so an expected "0.4.78"
+  # matches as a substring.
+  check_cmd flyctl "$EXPECTED_FLYCTL_VERSION"
+elif command -v flyctl >/dev/null 2>&1; then
+  warn "flyctl installed but INSTALL_FLYCTL is not 1" "leftover from an earlier profile config"
+fi
 
 # ============================================================================
 # Level 3 — config applied
@@ -149,14 +171,24 @@ check_symlink "$HOME/.zshenv"      "$HOME/repos/dotfiles/linux/.zshenv"
 check_symlink "$HOME/.bashrc"      "$HOME/repos/dotfiles/linux/.bashrc"
 check_symlink "$HOME/.profile"     "$HOME/repos/dotfiles/linux/.profile"
 check_symlink "$HOME/.gitconfig"   "$HOME/repos/dotfiles/common/.gitconfig"
+check_symlink "$HOME/.p10k.zsh"    "$HOME/repos/dotfiles/common/.p10k.zsh"
 check_symlink "$HOME/.config/nvim" "$HOME/repos/nvim-config"
 check_symlink "$HOME/projects"     "/mnt/dev"
+
+# powerlevel10k: the theme is cloned by provision.sh, the config comes from the
+# dotfiles common/ layer (checked above). Without the theme, .zshrc falls back
+# to a plain prompt — working, but not what this VM is supposed to look like.
+if [ -r "$HOME/repos/powerlevel10k/powerlevel10k.zsh-theme" ]; then
+  ok "powerlevel10k theme present"
+else
+  err "powerlevel10k theme missing" "re-run provision.sh"
+fi
 
 USERNS="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)"
 if [ "$USERNS" = "0" ]; then
   ok "apparmor_restrict_unprivileged_userns=0 (bwrap enabled)"
 else
-  err "apparmor_restrict_unprivileged_userns=$USERNS" "bwrap (ai-jail) will fail"
+  err "apparmor_restrict_unprivileged_userns=$USERNS" "bwrap sandboxes will fail"
 fi
 
 if id -nG "$USER" | tr ' ' '\n' | grep -qx docker; then
@@ -165,11 +197,21 @@ else
   err "$USER not in docker group" "run: sudo usermod -aG docker $USER; then reboot"
 fi
 
-if [ -f "$HOME/.ai-jail" ] && grep -q 'SSH_AUTH_SOCK' "$HOME/.ai-jail" 2>/dev/null; then
-  ok "~/.ai-jail configured with SSH agent passthrough"
-else
-  err "~/.ai-jail missing SSH agent passthrough" "re-run provision.sh"
-fi
+# Claude Code state must live on the /mnt/state mount, otherwise nuke.sh eats
+# every past session. Read the value a real login shell would see rather than
+# this script's own env, which the wrapper may not carry.
+CCD="$(sh -lc 'echo "$CLAUDE_CONFIG_DIR"' 2>/dev/null)"
+case "$CCD" in
+  /mnt/state/*)
+    if [ -d "$CCD" ] && [ -w "$CCD" ]; then
+      ok "CLAUDE_CONFIG_DIR=$CCD (sessions survive nuke.sh)"
+    else
+      err "CLAUDE_CONFIG_DIR=$CCD not a writable dir" "re-run provision.sh"
+    fi
+    ;;
+  "") err "CLAUDE_CONFIG_DIR not set in login shells" "re-run provision.sh" ;;
+  *)  err "CLAUDE_CONFIG_DIR=$CCD is outside /mnt/state" "sessions will not survive nuke.sh" ;;
+esac
 
 # ============================================================================
 # Level 4 — services alive
@@ -180,12 +222,6 @@ if docker info >/dev/null 2>&1; then
   ok "docker info responds"
 else
   err "docker info failed" "daemon not running or unreachable"
-fi
-
-if ai-jail --version >/dev/null 2>&1; then
-  ok "ai-jail runs"
-else
-  err "ai-jail failed to run"
 fi
 
 if claude --version >/dev/null 2>&1; then
@@ -216,6 +252,16 @@ if gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>/dev/null
   ok "gcloud authenticated"
 else
   warn "gcloud not authenticated" "run 'gcloud auth login' inside the VM"
+fi
+
+# flyctl: only on profiles that opted in. Auth is VM-local, so this warns again
+# after every nuke.sh.
+if [ "$EXPECTED_INSTALL_FLYCTL" = "1" ] && command -v flyctl >/dev/null 2>&1; then
+  if flyctl auth whoami >/dev/null 2>&1; then
+    ok "flyctl authenticated"
+  else
+    warn "flyctl not authenticated" "run 'fly auth login' inside the VM"
+  fi
 fi
 
 # ============================================================================

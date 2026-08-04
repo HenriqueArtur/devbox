@@ -27,6 +27,12 @@ mounts:
   - location: "${PROVISION_ROOT}"
     mountPoint: "/mnt/tooling"
     writable: false
+  # Per-profile state that must outlive the VM disk: Claude Code sessions and
+  # login (CLAUDE_CONFIG_DIR points at /mnt/state/claude). nuke.sh deletes the
+  # disk, never this. Created by up.sh if absent.
+  - location: "${STATE_ROOT}"
+    mountPoint: "/mnt/state"
+    writable: true
 
 mountType: "virtiofs"  # fastest option on Apple Silicon; requires vmType=vz
 
@@ -42,6 +48,10 @@ env:
   LAZYGIT_VERSION: "${LAZYGIT_VERSION}"
   DOTFILES_REPO: "${DOTFILES_REPO}"
   NVIM_CONFIG_REPO: "${NVIM_CONFIG_REPO}"
+  # Per-profile tool opt-ins. Empty renders as "" and provision.sh treats that
+  # as off/default, so a profile .env that predates them still works.
+  INSTALL_FLYCTL: "${INSTALL_FLYCTL}"
+  FLYCTL_VERSION: "${FLYCTL_VERSION}"
 
 # Provisioning runs on first boot. provision.sh is idempotent — safe to re-run.
 provision:
@@ -52,12 +62,16 @@ provision:
       set -euxo pipefail
       export DEBIAN_FRONTEND=noninteractive
       apt-get update
+      # bubblewrap: rootless sandbox binary. Claude Code's own Bash sandbox
+      # uses it on Linux and silently runs unsandboxed without it. (It used to
+      # come in as an ai-jail dependency, which this VM no longer installs.)
       apt-get install -y \
         build-essential curl git unzip ca-certificates \
         ripgrep fd-find \
         zsh \
         xclip \
-        pkg-config libssl-dev
+        pkg-config libssl-dev \
+        bubblewrap
       # Ubuntu ships fd as `fdfind`; add a `fd` alias binary.
       ln -sf /usr/bin/fdfind /usr/local/bin/fd || true
 

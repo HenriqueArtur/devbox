@@ -28,9 +28,16 @@ if [ "$st" != "Running" ]; then
   exit 2
 fi
 
+# An unpinned flyctl has no expected version to compare against — passing
+# "latest" through would make every check warn about a version mismatch.
+EXPECTED_FLYCTL_VERSION="${FLYCTL_VERSION:-latest}"
+[ "$EXPECTED_FLYCTL_VERSION" = "latest" ] && EXPECTED_FLYCTL_VERSION=""
+
 # Pass pinned versions so devbox-doctor can flag drift against devbox.env.
 exec limactl shell "$VM_NAME" env \
   EXPECTED_RUST_VERSION="$RUST_VERSION" \
   EXPECTED_NODE_VERSION="$NODE_VERSION" \
   EXPECTED_LAZYGIT_VERSION="$LAZYGIT_VERSION" \
+  EXPECTED_INSTALL_FLYCTL="${INSTALL_FLYCTL:-0}" \
+  EXPECTED_FLYCTL_VERSION="$EXPECTED_FLYCTL_VERSION" \
   devbox-doctor "$@"

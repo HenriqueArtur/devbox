@@ -23,11 +23,25 @@ if [ ! -d "$DEV_ROOT" ]; then
   exit 1
 fi
 
+# STATE_ROOT holds VM state that must outlive the VM disk (Claude Code
+# sessions + login). Unlike DEV_ROOT it is devbox-owned, so we create it
+# instead of erroring. Defaulted here as well, so profile .env files written
+# before this feature existed keep rendering a valid template.
+STATE_ROOT="${STATE_ROOT:-$HOME/.devbox/state/$VM_NAME}"
+export STATE_ROOT
+mkdir -p "$STATE_ROOT/claude"
+chmod 700 "$STATE_ROOT" "$STATE_ROOT/claude"
+
 # Render template into the profile-specific output file.
 if ! command -v envsubst >/dev/null 2>&1; then
   echo "[devbox] envsubst not found. Install gettext: brew install gettext" >&2
   exit 1
 fi
+# Per-profile opt-ins get explicit defaults so the rendered YAML never carries
+# an empty value for them.
+export INSTALL_FLYCTL="${INSTALL_FLYCTL:-0}"
+export FLYCTL_VERSION="${FLYCTL_VERSION:-latest}"
+
 envsubst < "$TMPL_FILE" > "$OUT_FILE"
 echo "[devbox:$PROFILE] rendered $OUT_FILE"
 

@@ -14,6 +14,10 @@ log() { echo "[provision] $*"; }
 : "${DOTFILES_REPO:?DOTFILES_REPO not set}"
 : "${NVIM_CONFIG_REPO:?NVIM_CONFIG_REPO not set}"
 
+# Optional, per-profile. Empty (profile did not set it) means "off"/default.
+: "${INSTALL_FLYCTL:=0}"
+: "${FLYCTL_VERSION:=latest}"
+
 REPOS_DIR="$HOME/repos"
 mkdir -p "$REPOS_DIR"
 
@@ -31,11 +35,12 @@ fi
 # ~/projects → /mnt/dev  (your code, scoped to this profile's DEV_ROOT)
 ln -sfn /mnt/dev "$HOME/projects"
 
-# --- Enable unprivileged user namespaces (required by ai-jail's bwrap) ------
+# --- Enable unprivileged user namespaces (bubblewrap sandboxes) -------------
 # Ubuntu 24.04's default AppArmor policy denies user-namespace creation for
 # unprivileged users. Every tool that uses rootless user namespaces breaks:
-# ai-jail (bwrap), rootless podman, flatpak, distrobox. We are inside a
-# dedicated Lima VM — the extra isolation is redundant with the VM boundary.
+# bwrap (Claude Code's own Bash sandbox), rootless podman, flatpak, distrobox.
+# We are inside a dedicated Lima VM — the extra isolation is redundant with
+# the VM boundary.
 if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != "0" ]; then
   log "relaxing apparmor_restrict_unprivileged_userns (bwrap needs it)"
   echo 'kernel.apparmor_restrict_unprivileged_userns=0' \
@@ -143,9 +148,10 @@ fi
 # gcloud + bq + gsutil + bundled Python. GKE-auth-plugin and kubectl are NOT
 # installed: add them later if you start using GKE.
 #
-# Ai-jail does NOT expose ~/.config/gcloud by default (unlike ~/.config/gh).
-# Rationale: gcloud can create/delete paid infra irreversibly, so each
-# agent session opts in explicitly with `ai-jail --rw-map ~/.config/gcloud`.
+# Note that with ai-jail gone, an agent running in this VM reaches gcloud (and
+# gh, and flyctl) with your full credentials. The VM boundary is the sandbox
+# now: what protects the Mac is that only this profile's DEV_ROOT is mounted.
+# `gcloud auth login` is still manual, per VM.
 if ! command -v gcloud >/dev/null 2>&1; then
   log "installing google-cloud-cli"
   sudo mkdir -p /etc/apt/keyrings
@@ -158,11 +164,49 @@ if ! command -v gcloud >/dev/null 2>&1; then
   sudo apt-get install -y google-cloud-cli
 fi
 
+# --- flyctl (opt-in per profile: INSTALL_FLYCTL=1) --------------------------
+# Only the profiles that actually deploy to Fly.io get it — see the
+# INSTALL_FLYCTL note in devbox.env.example.
+#
+# The installer drops both `flyctl` and `fly` into ~/.fly/bin, which is not on
+# PATH (PATH comes from the dotfiles' .zshenv and we do not want devbox
+# appending to it), so we symlink both into ~/.local/bin, which is.
+#
+# Auth (`fly auth login`) lands in ~/.fly/config.yml and is VM-local: it does
+# NOT survive nuke.sh. See README "Persistent state" if you want it moved to
+# the state mount.
+if [ "$INSTALL_FLYCTL" = "1" ]; then
+  flyctl_installed=""
+  if [ -x "$HOME/.fly/bin/flyctl" ]; then
+    flyctl_installed="$("$HOME/.fly/bin/flyctl" version 2>/dev/null \
+      | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 | tr -d 'v' || true)"
+  fi
+  want="$(echo "$FLYCTL_VERSION" | tr -d 'v')"
+  # "latest" never matches a version string, so it re-runs the installer on
+  # every provision — that is the point of not pinning.
+  if [ "$flyctl_installed" != "$want" ]; then
+    log "installing flyctl ${FLYCTL_VERSION}"
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --max-time 300 \
+      https://fly.io/install.sh | sh -s -- --non-interactive "$FLYCTL_VERSION"
+  fi
+  mkdir -p "$HOME/.local/bin"
+  ln -sfn "$HOME/.fly/bin/flyctl" "$HOME/.local/bin/flyctl"
+  ln -sfn "$HOME/.fly/bin/fly"    "$HOME/.local/bin/fly"
+else
+  log "INSTALL_FLYCTL != 1 — skipping flyctl for this profile"
+fi
+
 # --- dotfiles ----------------------------------------------------------------
 DOTFILES_DIR="$REPOS_DIR/dotfiles"
 if [ ! -d "$DOTFILES_DIR" ]; then
   log "cloning dotfiles"
   git clone "$DOTFILES_REPO" "$DOTFILES_DIR"
+else
+  # Re-provisioning an existing VM should pick up dotfiles pushed since the
+  # clone. --ff-only so a dirty or diverged tree is left alone instead of
+  # being merged behind your back.
+  git -C "$DOTFILES_DIR" pull --ff-only || \
+    log "warning: could not fast-forward dotfiles — resolve it inside the VM"
 fi
 ( cd "$DOTFILES_DIR" && ./install.sh --force )
 
@@ -176,52 +220,78 @@ fi
 # Its non-zero exit is not fatal — the symlink step (what we need) still runs.
 ( cd "$NVIM_CONFIG_DIR" && ./install.sh || true )
 
-# --- ai-jail (from cargo) ----------------------------------------------------
-if ! command -v ai-jail >/dev/null 2>&1; then
-  log "installing ai-jail"
-  sudo apt-get install -y bubblewrap
-  cargo install ai-jail
+# --- powerlevel10k -----------------------------------------------------------
+# The prompt config itself (~/.p10k.zsh) is a dotfile shared with the Mac —
+# it lives in dotfiles/common/ and was symlinked by the installer above. This
+# only installs the theme the config drives; dotfiles/linux/.zshrc sources it
+# from here and falls back to a plain prompt when it is missing.
+P10K_DIR="$REPOS_DIR/powerlevel10k"
+if [ ! -d "$P10K_DIR" ]; then
+  log "cloning powerlevel10k"
+  git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$P10K_DIR"
+else
+  git -C "$P10K_DIR" pull --ff-only || true
+fi
+# gitstatusd is a prebuilt binary p10k fetches on first prompt. Doing it here
+# keeps the first interactive shell from stalling; failure is not fatal because
+# p10k falls back to plain `git` calls.
+if [ -x "$P10K_DIR/gitstatus/install" ]; then
+  "$P10K_DIR/gitstatus/install" -f >/dev/null 2>&1 || \
+    log "warning: gitstatusd prefetch failed — p10k will fall back to git"
 fi
 
-# --- Global ai-jail config: forward SSH agent + gh auth ---------------------
-# ~/.ai-jail applies to every project inside this VM (per-project .ai-jail
-# still overrides it). We expose:
-#   - SSH_AUTH_SOCK from the Mac (Lima already forwards it into the VM) so
-#     `git push` works via the Mac's identity from inside the jail.
-#   - ~/.config/gh so gh auth persists across ai-jail sessions.
-# See ai-jail's README "Security notes" — this widens the sandbox surface;
-# accept it explicitly because we want git/gh usable during agent sessions.
-if [ ! -f "$HOME/.ai-jail" ]; then
-  log "writing global ~/.ai-jail (SSH agent + gh auth passthrough)"
-  # Compute the current SSH agent socket dir on the Mac-forwarded agent,
-  # so we can rw-map its parent (ai-jail does not expand env vars inside
-  # rw_maps — it treats them as literal paths).
-  ssh_sock_dir=""
-  if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -e "$SSH_AUTH_SOCK" ]; then
-    ssh_sock_dir="$(dirname "$SSH_AUTH_SOCK")"
-  fi
-  cat > "$HOME/.ai-jail" <<TOML
-# Global ai-jail config. Applies to every invocation of \`ai-jail\` in this
-# user account; per-project \`.ai-jail\` in a repo root takes precedence.
+# --- Claude Code state on the Mac (survives nuke.sh) -------------------------
+# Everything Claude Code keeps in its config dir — resumable session
+# transcripts (projects/, sessions/), the OAuth login, history, settings — is
+# redirected to /mnt/state/claude, a Mac-side directory (STATE_ROOT). nuke.sh
+# only deletes the VM disk, so `claude --resume` still lists every past session
+# in a freshly recreated VM.
 #
-# Managed by devbox provision.sh. Edit freely, but note that a \`nuke.sh\` +
-# \`up.sh\` will overwrite this file.
+# Transcripts are keyed by absolute cwd and the code is always at the same
+# guest path (/mnt/dev/<repo>), so those keys stay stable across recreation too.
+CLAUDE_STATE_DIR="/mnt/state/claude"
+if [ ! -d /mnt/state ]; then
+  log "warning: /mnt/state not mounted — STATE_ROOT missing from this profile's"
+  log "warning: .env file. Claude state stays VM-local and nuke.sh will lose it."
+else
+  mkdir -p "$CLAUDE_STATE_DIR"
+  # Non-fatal: up.sh already chmods it Mac-side, and a chmod that virtiofs
+  # refuses must not take the whole provision down with it.
+  chmod 700 "$CLAUDE_STATE_DIR" || true
 
-# Forward SSH_AUTH_SOCK env into the jail so \`git push\` sees an agent.
-env_passthrough = ["SSH_AUTH_SOCK"]
-$( [ -n "$ssh_sock_dir" ] && echo "
-# Expose the agent socket's directory so the socket path is reachable
-# inside the jail. Path resolved at provision time — ai-jail does not
-# expand \\\$SSH_AUTH_SOCK inside rw_maps.
-rw_maps = [\"$ssh_sock_dir\"]" )
+  # One-time migration: a VM provisioned before this change keeps its state in
+  # ~/.claude + ~/.claude.json. Move it onto the mount instead of leaving it on
+  # a disk that nuke.sh throws away.
+  if [ -d "$HOME/.claude" ] && [ ! -L "$HOME/.claude" ] && \
+     [ -z "$(ls -A "$CLAUDE_STATE_DIR" 2>/dev/null)" ]; then
+    log "migrating existing ~/.claude into $CLAUDE_STATE_DIR"
+    cp -a "$HOME/.claude/." "$CLAUDE_STATE_DIR/"
+    [ -f "$HOME/.claude.json" ] && cp -a "$HOME/.claude.json" "$CLAUDE_STATE_DIR/.claude.json"
+    mv "$HOME/.claude" "$HOME/.claude.pre-devbox-state"
+  fi
 
-# Persist gh's auth token across sessions.
-[commands.claude]
-rw_maps = ["~/.config/gh"]
+  # CLAUDE_CONFIG_DIR relocates the entire config dir — .claude.json and the
+  # stored OAuth credentials included. /etc/environment is read by PAM, so
+  # every `limactl shell` and ssh session sees it whatever the shell is.
+  if ! grep -q '^CLAUDE_CONFIG_DIR=' /etc/environment 2>/dev/null; then
+    log "setting CLAUDE_CONFIG_DIR=$CLAUDE_STATE_DIR in /etc/environment"
+    echo "CLAUDE_CONFIG_DIR=$CLAUDE_STATE_DIR" | sudo tee -a /etc/environment >/dev/null
+  fi
+  # Belt and braces: PAM does not apply to `limactl shell <vm> -- cmd` style
+  # non-login invocations in every Lima version, and zsh ignores
+  # /etc/profile.d unless /etc/zsh/zprofile sources /etc/profile (Ubuntu's
+  # does). Cheap enough to set both.
+  sudo tee /etc/profile.d/devbox-claude.sh >/dev/null <<EOF
+# Managed by devbox provision.sh — do not edit, see /mnt/tooling/provision.sh.
+export CLAUDE_CONFIG_DIR="$CLAUDE_STATE_DIR"
+EOF
+  export CLAUDE_CONFIG_DIR="$CLAUDE_STATE_DIR"
 
-[commands.gh]
-rw_maps = ["~/.config/gh"]
-TOML
+  # Fallback: if a shell ever loses the env var, ~/.claude still resolves to
+  # the persisted dir instead of quietly starting a fresh VM-local one.
+  if [ ! -e "$HOME/.claude" ] || [ -L "$HOME/.claude" ]; then
+    ln -sfn "$CLAUDE_STATE_DIR" "$HOME/.claude"
+  fi
 fi
 
 # --- Claude Code CLI ---------------------------------------------------------
