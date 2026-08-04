@@ -294,10 +294,29 @@ EOF
   fi
 fi
 
-# --- Claude Code CLI ---------------------------------------------------------
-if ! command -v claude >/dev/null 2>&1; then
-  log "installing claude code cli"
-  npm install -g @anthropic-ai/claude-code
+# --- Claude Code CLI (native binary, deliberately NOT the npm package) -------
+# The npm global package has misbehaved for us before. The native installer
+# checks the release manifest's SHA256, puts a self-contained binary under
+# ~/.local/share/claude/versions/ with a launcher at ~/.local/bin/claude, and
+# updates itself from then on — which is why nothing is pinned here.
+#
+# ~/.local/bin is already first on PATH via the dotfiles' .zshenv, so the
+# installer has no reason to touch any shell rc file (and must not: ~/.zshrc is
+# a symlink into the dotfiles clone).
+CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
+if [ "$CLAUDE_BIN" != "$HOME/.local/bin/claude" ]; then
+  # A VM provisioned by an earlier devbox may still carry the npm install.
+  # Remove it first, otherwise its mise shim keeps shadowing the native
+  # launcher on PATH and this block re-runs on every provision.
+  if command -v npm >/dev/null 2>&1 && \
+     npm ls -g --depth=0 @anthropic-ai/claude-code >/dev/null 2>&1; then
+    log "removing npm-installed claude code in favour of the native binary"
+    npm uninstall -g @anthropic-ai/claude-code || true
+    mise reshim || true
+  fi
+  log "installing claude code (native installer)"
+  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --max-time 300 \
+    https://claude.ai/install.sh | bash
 fi
 
 # --- devbox-doctor -----------------------------------------------------------

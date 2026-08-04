@@ -246,3 +246,8 @@ re-provision, so a soft reprovision picks it up.
   there. If that ever misbehaves, unset `CLAUDE_CONFIG_DIR` in
   `/etc/profile.d/devbox-claude.sh` to fall back to VM-local state — you lose
   persistence, not the tool.
+- Claude Code comes from the native installer (`claude.ai/install.sh`), never
+  the npm package: `~/.local/bin/claude` launching a binary from
+  `~/.local/share/claude/versions/`. `devbox-doctor` errors if `claude`
+  resolves anywhere else, which is how an npm install would show up. It
+  self-updates, so no version is pinned in `.env`.

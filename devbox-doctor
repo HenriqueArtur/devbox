@@ -197,6 +197,15 @@ else
   err "$USER not in docker group" "run: sudo usermod -aG docker $USER; then reboot"
 fi
 
+# Claude Code must be the native binary, not the npm package: a mise shim in
+# the answer here means an npm install crept back in.
+CLAUDE_PATH="$(command -v claude 2>/dev/null || true)"
+case "$CLAUDE_PATH" in
+  "$HOME/.local/bin/claude") ok "claude is the native install ($CLAUDE_PATH)" ;;
+  "") err "claude not on PATH" "re-run provision.sh" ;;
+  *)  err "claude at $CLAUDE_PATH" "expected the native install at ~/.local/bin/claude" ;;
+esac
+
 # Claude Code state must live on the /mnt/state mount, otherwise nuke.sh eats
 # every past session. Read the value a real login shell would see rather than
 # this script's own env, which the wrapper may not carry.
