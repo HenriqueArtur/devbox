@@ -33,8 +33,13 @@ fi
 EXPECTED_FLYCTL_VERSION="${FLYCTL_VERSION:-latest}"
 [ "$EXPECTED_FLYCTL_VERSION" = "latest" ] && EXPECTED_FLYCTL_VERSION=""
 
+# --workdir /: `limactl shell` otherwise tries to mirror the Mac's CWD inside
+# the guest, and a Mac-only path (~/Documents/dev/devbox) makes it print two
+# "no such file or directory" cd errors before the report — which reads like a
+# failure. None of the checks care about CWD.
+#
 # Pass pinned versions so devbox-doctor can flag drift against devbox.env.
-exec limactl shell "$VM_NAME" env \
+exec limactl shell --workdir / "$VM_NAME" env \
   EXPECTED_RUST_VERSION="$RUST_VERSION" \
   EXPECTED_NODE_VERSION="$NODE_VERSION" \
   EXPECTED_LAZYGIT_VERSION="$LAZYGIT_VERSION" \

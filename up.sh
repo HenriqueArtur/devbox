@@ -52,7 +52,10 @@ if limactl list --quiet | grep -qx "$VM_NAME"; then
   limactl start "$VM_NAME"
 else
   echo "[devbox:$PROFILE] creating VM '$VM_NAME'"
-  limactl start --name="$VM_NAME" "$OUT_FILE"
+  # --tty=false: take the rendered YAML as-is instead of opening Lima's
+  # interactive "proceed / edit" prompt, so this works the same whether a
+  # human or a script runs it.
+  limactl start --tty=false --name="$VM_NAME" "$OUT_FILE"
   FRESH=1
 fi
 
