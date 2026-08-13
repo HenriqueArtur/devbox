@@ -240,6 +240,18 @@ if [ -x "$P10K_DIR/gitstatus/install" ]; then
     log "warning: gitstatusd prefetch failed — p10k will fall back to git"
 fi
 
+# --- zsh-autocomplete (not in apt) -------------------------------------------
+# apt ships zsh-autosuggestions + zsh-syntax-highlighting (installed by the
+# system provisioner in the template). zsh-autocomplete is not packaged, so
+# clone it here. dotfiles/linux/.zshrc sources all three.
+AUTOCOMPLETE_DIR="$REPOS_DIR/zsh-autocomplete"
+if [ ! -d "$AUTOCOMPLETE_DIR" ]; then
+  log "cloning zsh-autocomplete"
+  git clone --depth=1 https://github.com/marlonrichert/zsh-autocomplete.git "$AUTOCOMPLETE_DIR"
+else
+  git -C "$AUTOCOMPLETE_DIR" pull --ff-only || true
+fi
+
 # --- Claude Code state on the Mac (survives nuke.sh) -------------------------
 # Everything Claude Code keeps in its config dir — resumable session
 # transcripts (projects/, sessions/), the OAuth login, history, settings — is
