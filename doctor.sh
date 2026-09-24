@@ -24,7 +24,15 @@ fi
 
 st="$(limactl list --format '{{.Status}}' "$VM_NAME" 2>/dev/null || echo "")"
 if [ "$st" != "Running" ]; then
-  echo "[doctor:$PROFILE] VM '$VM_NAME' status is '$st'. Run ./up.sh $([ "$PROFILE" = devbox ] || echo "$PROFILE") first." >&2
+  UP_ARG="$([ "$PROFILE" = devbox ] || echo "$PROFILE")"
+  if [ "$st" = "Broken" ]; then
+    # See up.sh + lima-vm/lima#5087. up.sh auto-recovers by force-stopping the
+    # orphaned VZ pid before starting, so the user does not need to.
+    echo "[doctor:$PROFILE] VM '$VM_NAME' is Broken (stale VZ pid from Lima #5087)." >&2
+    echo "[doctor:$PROFILE] Run ./up.sh $UP_ARG to auto-recover and start." >&2
+  else
+    echo "[doctor:$PROFILE] VM '$VM_NAME' status is '$st'. Run ./up.sh $UP_ARG first." >&2
+  fi
   exit 2
 fi
 

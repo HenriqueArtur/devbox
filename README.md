@@ -238,6 +238,12 @@ re-provision, so a soft reprovision picks it up.
 
 - `vmType: vz` uses macOS Virtualization.framework — fast on Apple Silicon.
   Intel Macs may need `vmType: qemu` (edit the template).
+- If `limactl list` ever shows a VM as `Broken` with
+  `vz driver is running but host agent is not`, that is
+  [lima-vm/lima#5087](https://github.com/lima-vm/lima/issues/5087) — the VZ
+  driver does not shut down cleanly on macOS SIGTERM (shutdown / sleep), leaving
+  a stale pid. `./up.sh` detects this and force-stops before starting, so just
+  re-run it. No data loss: only the VM process is orphaned, not the disk.
 - `mountType: virtiofs` is the fastest mount driver but requires `vz`. If you
   switch to qemu, change to `mountType: reverse-sshfs` or `9p`.
 - SSH agent forwarding is on at the Lima level, so `git push` inside the VM

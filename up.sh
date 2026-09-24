@@ -48,6 +48,16 @@ echo "[devbox:$PROFILE] rendered $OUT_FILE"
 # Start (or restart) the VM.
 FRESH=0
 if limactl list --quiet | grep -qx "$VM_NAME"; then
+  # Lima 2.x with vmType=vz can leave the VM in status "Broken" ("vz driver is
+  # running but host agent is not") after macOS sends SIGTERM at shutdown/sleep,
+  # because CanRequestStop is unsupported on the VZ handle Lima creates. See
+  # lima-vm/lima#5087. `limactl start` refuses to run on a Broken instance, so
+  # force-stop first to clear the orphaned pid.
+  st="$(limactl list --format '{{.Status}}' "$VM_NAME" 2>/dev/null || echo "")"
+  if [ "$st" = "Broken" ]; then
+    echo "[devbox:$PROFILE] VM '$VM_NAME' is Broken (stale VZ pid, Lima #5087); forcing stop"
+    limactl stop --force "$VM_NAME" || true
+  fi
   echo "[devbox:$PROFILE] VM '$VM_NAME' exists; starting if stopped"
   limactl start "$VM_NAME"
 else
