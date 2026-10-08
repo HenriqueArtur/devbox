@@ -158,6 +158,7 @@ devbox/
 ├── devbox-doctor            # committed: script installed into every VM
 ├── _lib.sh                  # committed: profile resolution helpers
 ├── up.sh / down.sh / nuke.sh
+├── limactl-recover.zsh     # committed: host ~/.zshrc helper, see Recovering from Broken VMs
 └── doctor.sh
 ```
 
@@ -172,7 +173,11 @@ cd ~/Documents/dev/devbox
 cp devbox.env.example devbox.env
 $EDITOR devbox.env         # DEV_ROOT reflects where things live on this Mac
 ./up.sh
+echo 'source ~/Documents/dev/devbox/limactl-recover.zsh' >> ~/.zshrc
 ```
+
+The last line makes `limactl shell` survive Lima's shutdown crash — see
+[Recovering from Broken VMs](#recovering-from-broken-vms).
 
 The template picks up your machine-local paths from `devbox.env`; the rest
 of the environment (Ubuntu version, Rust version, installed tools,
@@ -234,6 +239,36 @@ Because dotfiles are cloned from GitHub (never mounted), a change to them
 reaches a VM only after you push it. `provision.sh` runs `git pull --ff-only` on
 re-provision, so a soft reprovision picks it up.
 
+## Recovering from Broken VMs
+
+Lima's VZ driver crashes when macOS shuts down or sleeps with a VM running
+([lima-vm/lima#5087](https://github.com/lima-vm/lima/issues/5087)), so after a
+reboot plain `limactl shell <vm>` fails with:
+
+```
+ERRO[0000] Instance `sunne` has configuration errors     error="vz driver is running but host agent is not"
+ssh: connect to host 127.0.0.1 port 49467: Connection refused
+```
+
+Set up once per Mac — add to `~/.zshrc`:
+
+```zsh
+source ~/Documents/dev/devbox/limactl-recover.zsh   # adjust to where this repo lives
+```
+
+`limactl-recover.zsh` wraps `limactl`: when `limactl shell <vm>` or
+`limactl start <vm>` hits a `Broken` VM, it clears the orphaned pid and starts
+the VM, then carries on with your command. Anything else goes straight to the
+real `limactl`. `./up.sh` does the same recovery.
+
+It only force-stops the pid in `vz.pid` when that pid is really a Lima process.
+After a reboot that pid has usually been reused by something unrelated, which
+`limactl stop --force` would kill — so the stale pidfile is removed instead.
+
+To avoid the crash in the first place, `./down.sh <profile>` before shutting
+the Mac down. Lima's own fix (lima-vm/lima#5088, in v2.3.0) only makes
+`limactl start` recover; the shutdown crash itself remains.
+
 ## Notes
 
 - `vmType: vz` uses macOS Virtualization.framework — fast on Apple Silicon.
@@ -242,8 +277,9 @@ re-provision, so a soft reprovision picks it up.
   `vz driver is running but host agent is not`, that is
   [lima-vm/lima#5087](https://github.com/lima-vm/lima/issues/5087) — the VZ
   driver does not shut down cleanly on macOS SIGTERM (shutdown / sleep), leaving
-  a stale pid. `./up.sh` detects this and force-stops before starting, so just
-  re-run it. No data loss: only the VM process is orphaned, not the disk.
+  a stale pid. `./up.sh` and the `limactl` wrapper (see
+  [Recovering from Broken VMs](#recovering-from-broken-vms)) both recover it.
+  No data loss: only the VM process is orphaned, not the disk.
 - `mountType: virtiofs` is the fastest mount driver but requires `vz`. If you
   switch to qemu, change to `mountType: reverse-sshfs` or `9p`.
 - SSH agent forwarding is on at the Lima level, so `git push` inside the VM

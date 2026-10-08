@@ -52,11 +52,20 @@ if limactl list --quiet | grep -qx "$VM_NAME"; then
   # running but host agent is not") after macOS sends SIGTERM at shutdown/sleep,
   # because CanRequestStop is unsupported on the VZ handle Lima creates. See
   # lima-vm/lima#5087. `limactl start` refuses to run on a Broken instance, so
-  # force-stop first to clear the orphaned pid.
+  # clear the orphaned pid first.
   st="$(limactl list --format '{{.Status}}' "$VM_NAME" 2>/dev/null || echo "")"
   if [ "$st" = "Broken" ]; then
-    echo "[devbox:$PROFILE] VM '$VM_NAME' is Broken (stale VZ pid, Lima #5087); forcing stop"
-    limactl stop --force "$VM_NAME" || true
+    echo "[devbox:$PROFILE] VM '$VM_NAME' is Broken (stale VZ pid, Lima #5087); recovering"
+    # After a reboot the pid in vz.pid usually belongs to some unrelated
+    # process, and `stop --force` would kill it. Only force-stop a real Lima
+    # process; otherwise just drop the stale pidfile.
+    vm_dir="$(limactl list --format '{{.Dir}}' "$VM_NAME")"
+    pid="$(cat "$vm_dir/vz.pid" 2>/dev/null || true)"
+    if [ -n "$pid" ] && ps -o command= -p "$pid" 2>/dev/null | grep -q "limactl.* $VM_NAME\$"; then
+      limactl stop --force "$VM_NAME" || true
+    else
+      rm -f "$vm_dir/vz.pid"
+    fi
   fi
   echo "[devbox:$PROFILE] VM '$VM_NAME' exists; starting if stopped"
   limactl start "$VM_NAME"
